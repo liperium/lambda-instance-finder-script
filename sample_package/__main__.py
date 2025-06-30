@@ -1,0 +1,266 @@
+#!/usr/bin/env python3
+"""
+Lambda Cloud Instance Finder
+Finds the lowest-priced available instance in us-east-1 region under $2.00/hour
+"""
+
+import requests
+import json
+import os
+import dotenv
+from typing import Dict, List, Optional, Tuple
+from rich.console import Console
+from rich.table import Table
+from rich.panel import Panel
+from rich.text import Text
+from rich.progress import Progress, SpinnerColumn, TextColumn
+from rich.prompt import Prompt
+from rich import box
+import time
+
+# Initialize Rich console
+console = Console()
+
+class LambdaCloudClient:
+    def __init__(self, api_key: str):
+        self.api_key = api_key
+        self.base_url = "https://cloud.lambda.ai/api/v1"
+        self.headers = {
+            'accept': 'application/json'
+        }
+    
+    def get_instance_types(self) -> Dict:
+        """Fetch all available instance types from Lambda Cloud API"""
+        url = f"{self.base_url}/instance-types"
+        
+        try:
+            with Progress(
+                SpinnerColumn(style="cyan"),
+                TextColumn("[cyan]Fetching instance data from Lambda Cloud API..."),
+                console=console
+            ) as progress:
+                task = progress.add_task("", total=None)
+                response = requests.get(
+                    url, 
+                    headers=self.headers, 
+                    auth=(self.api_key, '')
+                )
+                response.raise_for_status()
+                return response.json()
+        
+        except requests.exceptions.RequestException as e:
+            console.print(f"[red]❌ Error fetching data from API:[/red] {e}")
+            return {}
+    
+    def find_cheapest_instance(
+        self, 
+        target_region: str = "us-east-1", 
+        max_price_cents: int = 200
+    ) -> Optional[Tuple[str, Dict]]:
+        """
+        Find the cheapest available instance in the target region under max price
+        
+        Args:
+            target_region: Region to search for instances (default: us-east-1)
+            max_price_cents: Maximum price in cents per hour (default: 200)
+            
+        Returns:
+            Tuple of (instance_name, instance_data) or None if no match found
+        """
+        data = self.get_instance_types()
+        
+        if not data or 'data' not in data:
+            console.print("[red]❌ No data received from API[/red]")
+            return None
+        
+        available_instances = []
+        
+        with Progress(
+            SpinnerColumn(style="green"),
+            TextColumn("[green]🔍 Analyzing instance availability..."),
+            console=console
+        ) as progress:
+            task = progress.add_task("", total=None)
+            
+            # Filter instances by region availability and price
+            for instance_name, instance_info in data['data'].items():
+                instance_type = instance_info.get('instance_type', {})
+                regions = instance_info.get('regions_with_capacity_available', [])
+                price = instance_type.get('price_cents_per_hour', float('inf'))
+                
+                # Check if instance is available in target region and under price limit
+                region_available = any(
+                    region.get('name') == target_region 
+                    for region in regions
+                )
+                
+                if region_available and price <= max_price_cents:
+                    available_instances.append((instance_name, instance_info, price))
+        
+        if not available_instances:
+            console.print(f"[yellow]⚠️  No instances found in {target_region} under ${max_price_cents/100:.2f}/hour[/yellow]")
+            return None
+        
+        # Sort by price and return the cheapest
+        available_instances.sort(key=lambda x: x[2])
+        cheapest_name, cheapest_info, cheapest_price = available_instances[0]
+        
+        return cheapest_name, cheapest_info
+    
+    def display_instance_info(self, instance_name: str, instance_info: Dict):
+        """Display formatted instance information using Rich tables and panels"""
+        instance_type = instance_info['instance_type']
+        specs = instance_type['specs']
+        regions = instance_info['regions_with_capacity_available']
+        
+        # Create main info panel
+        title = Text()
+        title.append("🚀 ", style="cyan")
+        title.append("BEST MATCH FOUND", style="bold cyan")
+        title.append(" 🚀", style="cyan")
+        
+        instance_panel = Panel(
+            f"[bold green]{instance_name}[/bold green]\n[dim]{instance_type['description']}[/dim]",
+            title=title,
+            border_style="cyan",
+            box=box.ROUNDED
+        )
+        console.print(instance_panel)
+        
+        # Create specifications table
+        spec_table = Table(title="💻 Instance Specifications", box=box.ROUNDED, title_style="bold blue")
+        spec_table.add_column("🏷️  Spec", style="cyan", no_wrap=True)
+        spec_table.add_column("📊 Value", style="green")
+        
+        spec_table.add_row("💰 Price", f"${instance_type['price_cents_per_hour']/100:.2f}/hour")
+        spec_table.add_row("🎮 GPU", instance_type['gpu_description'])
+        spec_table.add_row("⚡ vCPUs", str(specs['vcpus']))
+        spec_table.add_row("🧠 Memory", f"{specs['memory_gib']} GiB")
+        spec_table.add_row("💾 Storage", f"{specs['storage_gib']} GiB")
+        spec_table.add_row("🔥 GPU Count", str(specs['gpus']))
+        
+        console.print(spec_table)
+        
+        # Create regions table
+        regions_table = Table(title="🌍 Available Regions", box=box.ROUNDED, title_style="bold magenta")
+        regions_table.add_column("🏁 Region", style="cyan")
+        regions_table.add_column("📍 Description", style="yellow")
+        
+        for region in regions:
+            regions_table.add_row(region['name'], region['description'])
+        
+        console.print(regions_table)
+        
+        # Success message
+        success_panel = Panel(
+            f"[green]✅ Found perfect match! Instance [bold]{instance_name}[/bold] is ready to launch.[/green]",
+            border_style="green",
+            box=box.ROUNDED
+        )
+        console.print(success_panel)
+
+    def show_alternatives(self, target_region: str):
+        """Show alternative instances in the region if no matches found under price limit"""
+        console.print(f"\n[cyan]🔍 Checking all available instances in {target_region}...[/cyan]")
+        
+        all_in_region = self.find_cheapest_instance(target_region, float('inf'))
+        if all_in_region:
+            name, info = all_in_region
+            price = info['instance_type']['price_cents_per_hour']/100
+            
+            alt_panel = Panel(
+                f"[yellow]💡 Alternative: [bold]{name}[/bold] at [bold]${price:.2f}/hour[/bold][/yellow]",
+                title="🔄 Cheapest Available in Region",
+                border_style="yellow",
+                box=box.ROUNDED
+            )
+            console.print(alt_panel)
+        else:
+            console.print(f"[red]❌ No instances available in {target_region}[/red]")
+
+def print_header():
+    """Print a beautiful header"""
+    header = Text()
+    header.append("⚡ ", style="yellow")
+    header.append("LAMBDA CLOUD", style="bold cyan")
+    header.append(" ☁️\n", style="cyan")
+    header.append("Instance Finder", style="bold blue")
+    
+    header_panel = Panel(
+        header,
+        box=box.DOUBLE,
+        border_style="cyan",
+        width=50,
+        padding=(1, 2)
+    )
+    
+    console.print("\n")
+    console.print(header_panel, justify="center")
+    console.print("\n")
+
+def main():
+    print_header()
+    
+    # Get API key from environment variable
+    api_key = os.getenv('LAMBDA_API_KEY')
+    
+    if not api_key:
+        error_panel = Panel(
+            "[red]❌ Missing API Key![/red]\n\n"
+            "[yellow]Please set the LAMBDA_API_KEY environment variable:[/yellow]\n"
+            "[cyan]export LAMBDA_API_KEY='your_secret_key_here'[/cyan]",
+            title="🔑 Configuration Error",
+            border_style="red",
+            box=box.ROUNDED
+        )
+        console.print(error_panel)
+        return
+    
+    # Initialize client
+    client = LambdaCloudClient(api_key)
+    
+    # Configuration
+    TARGET_REGION = "us-east-1"
+    MAX_PRICE_CENTS = 200  # $2.00/hour
+    
+    # Search parameters panel
+    search_info = f"""[cyan]🎯 Target Region:[/cyan] [bold]{TARGET_REGION}[/bold]
+[cyan]💰 Max Price:[/cyan] [bold]${MAX_PRICE_CENTS/100:.2f}/hour[/bold]"""
+    
+    search_panel = Panel(
+        search_info,
+        title="🔍 Search Parameters",
+        border_style="blue",
+        box=box.ROUNDED
+    )
+    console.print(search_panel)
+    console.print()
+    
+    # Find the cheapest instance
+    result = client.find_cheapest_instance(TARGET_REGION, MAX_PRICE_CENTS)
+    
+    if result:
+        instance_name, instance_info = result
+        client.display_instance_info(instance_name, instance_info)
+        
+        # Optional: Return instance data for programmatic use
+        return {
+            'name': instance_name,
+            'data': instance_info
+        }
+    else:
+        # Show alternatives if no matches found
+        client.show_alternatives(TARGET_REGION)
+        
+        # Final message
+        console.print("\n[dim]💡 Tip: Try increasing your budget or checking other regions for more options.[/dim]")
+
+if __name__ == "__main__":
+    try:
+        dotenv.load_dotenv()
+        main()
+    except KeyboardInterrupt:
+        console.print("\n[yellow]👋 Search cancelled by user[/yellow]")
+    except Exception as e:
+        console.print(f"\n[red]💥 Unexpected error: {e}[/red]")
+        console.print("[dim]Please check your API key and internet connection.[/dim]")
