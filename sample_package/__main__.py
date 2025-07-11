@@ -2,6 +2,7 @@
 """
 Lambda Cloud Instance Finder
 Finds the lowest-priced available instance in us-east-1 region under $2.00/hour
+Loops every 5 seconds until a good instance is found
 """
 
 import requests
@@ -17,6 +18,7 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.prompt import Prompt
 from rich import box
 import time
+from datetime import datetime
 
 # Initialize Rich console
 console = Console()
@@ -98,7 +100,6 @@ class LambdaCloudClient:
                     available_instances.append((instance_name, instance_info, price))
         
         if not available_instances:
-            console.print(f"[yellow]⚠️  No instances found in {target_region} under ${max_price_cents/100:.2f}/hour[/yellow]")
             return None
         
         # Sort by price and return the cheapest
@@ -185,6 +186,7 @@ def print_header():
     header.append("LAMBDA CLOUD", style="bold cyan")
     header.append(" ☁️\n", style="cyan")
     header.append("Instance Finder", style="bold blue")
+    header.append("\n🔄 Auto-Loop Mode", style="bold magenta")
     
     header_panel = Panel(
         header,
@@ -197,6 +199,35 @@ def print_header():
     console.print("\n")
     console.print(header_panel, justify="center")
     console.print("\n")
+
+def print_search_attempt(attempt: int, target_region: str, max_price: float):
+    """Print search attempt information"""
+    current_time = datetime.now().strftime("%H:%M:%S")
+    
+    attempt_text = f"[bold cyan]🔍 Search Attempt #{attempt}[/bold cyan]\n"
+    attempt_text += f"[dim]⏰ Time: {current_time}[/dim]\n"
+    attempt_text += f"[cyan]🎯 Region:[/cyan] [bold]{target_region}[/bold]\n"
+    attempt_text += f"[cyan]💰 Max Price:[/cyan] [bold]${max_price:.2f}/hour[/bold]"
+    
+    attempt_panel = Panel(
+        attempt_text,
+        border_style="blue",
+        box=box.ROUNDED,
+        title="🔍 Searching..."
+    )
+    console.print(attempt_panel)
+
+def print_no_match_message(attempt: int):
+    """Print message when no matching instance is found"""
+    retry_panel = Panel(
+        f"[yellow]⚠️  No suitable instances found on attempt #{attempt}[/yellow]\n"
+        f"[dim]💤 Waiting 5 seconds before next attempt...[/dim]\n"
+        f"[dim]⏹️  Press Ctrl+C to stop searching[/dim]",
+        title="🔄 Retrying",
+        border_style="yellow",
+        box=box.ROUNDED
+    )
+    console.print(retry_panel)
 
 def main():
     print_header()
@@ -222,45 +253,97 @@ def main():
     # Configuration
     TARGET_REGION = "us-east-1"
     MAX_PRICE_CENTS = 200  # $2.00/hour
+    MAX_PRICE_DOLLARS = MAX_PRICE_CENTS / 100
     
-    # Search parameters panel
-    search_info = f"""[cyan]🎯 Target Region:[/cyan] [bold]{TARGET_REGION}[/bold]
-[cyan]💰 Max Price:[/cyan] [bold]${MAX_PRICE_CENTS/100:.2f}/hour[/bold]"""
+    # Loop parameters
+    attempt = 0
+    start_time = datetime.now()
     
-    search_panel = Panel(
-        search_info,
-        title="🔍 Search Parameters",
+    # Show initial configuration
+    config_info = f"""[cyan]🎯 Target Region:[/cyan] [bold]{TARGET_REGION}[/bold]
+[cyan]💰 Max Price:[/cyan] [bold]${MAX_PRICE_DOLLARS:.2f}/hour[/bold]
+[cyan]🔄 Check Interval:[/cyan] [bold]5 seconds[/bold]
+[cyan]⏰ Started:[/cyan] [bold]{start_time.strftime("%H:%M:%S")}[/bold]"""
+    
+    config_panel = Panel(
+        config_info,
+        title="⚙️ Configuration",
         border_style="blue",
         box=box.ROUNDED
     )
-    console.print(search_panel)
+    console.print(config_panel)
     console.print()
     
-    # Find the cheapest instance
-    result = client.find_cheapest_instance(TARGET_REGION, MAX_PRICE_CENTS)
-    
-    if result:
-        instance_name, instance_info = result
-        client.display_instance_info(instance_name, instance_info)
+    # Main search loop
+    while True:
+        attempt += 1
         
-        # Optional: Return instance data for programmatic use
-        return {
-            'name': instance_name,
-            'data': instance_info
-        }
-    else:
-        # Show alternatives if no matches found
-        client.show_alternatives(TARGET_REGION)
+        # Print current attempt info
+        print_search_attempt(attempt, TARGET_REGION, MAX_PRICE_DOLLARS)
         
-        # Final message
-        console.print("\n[dim]💡 Tip: Try increasing your budget or checking other regions for more options.[/dim]")
+        # Search for instances
+        result = client.find_cheapest_instance(TARGET_REGION, MAX_PRICE_CENTS)
+        
+        if result:
+            # Found a good instance!
+            console.print("\n")
+            elapsed_time = datetime.now() - start_time
+            
+            # Show success summary
+            success_summary = f"[green]🎉 SUCCESS![/green]\n"
+            success_summary += f"[cyan]⏱️  Total time:[/cyan] [bold]{elapsed_time.total_seconds():.1f} seconds[/bold]\n"
+            success_summary += f"[cyan]🔄 Attempts:[/cyan] [bold]{attempt}[/bold]"
+            
+            summary_panel = Panel(
+                success_summary,
+                title="✅ Instance Found",
+                border_style="green",
+                box=box.ROUNDED
+            )
+            console.print(summary_panel)
+            console.print()
+            
+            # Display the found instance
+            instance_name, instance_info = result
+            client.display_instance_info(instance_name, instance_info)
+            
+            # Return instance data for programmatic use
+            return {
+                'name': instance_name,
+                'data': instance_info,
+                'attempts': attempt,
+                'elapsed_seconds': elapsed_time.total_seconds()
+            }
+        else:
+            # No instance found, show retry message
+            print_no_match_message(attempt)
+            
+            # Show alternatives on first attempt only
+            if attempt == 1:
+                client.show_alternatives(TARGET_REGION)
+            
+            # Wait 5 seconds before next attempt
+            try:
+                for i in range(5, 0, -1):
+                    console.print(f"\r[dim]⏳ Next search in {i} seconds...[/dim]", end="")
+                    time.sleep(1)
+                console.print("\r" + " " * 50 + "\r", end="")  # Clear countdown line
+                console.print()  # Add newline for next attempt
+                
+            except KeyboardInterrupt:
+                # User pressed Ctrl+C during countdown
+                raise KeyboardInterrupt
 
 if __name__ == "__main__":
     try:
         dotenv.load_dotenv()
-        main()
+        result = main()
+        if result:
+            console.print(f"\n[dim]💡 Found {result['name']} after {result['attempts']} attempts in {result['elapsed_seconds']:.1f} seconds[/dim]")
     except KeyboardInterrupt:
         console.print("\n[yellow]👋 Search cancelled by user[/yellow]")
+        elapsed = datetime.now() - datetime.now()  # This will be overwritten if we track start time
+        console.print("[dim]💡 You can restart the search anytime by running the script again.[/dim]")
     except Exception as e:
         console.print(f"\n[red]💥 Unexpected error: {e}[/red]")
         console.print("[dim]Please check your API key and internet connection.[/dim]")
