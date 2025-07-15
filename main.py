@@ -81,6 +81,7 @@ class LambdaCloudClient:
         available_instances.sort(key=lambda x: x[2])
         cheapest_name, cheapest_info, cheapest_price = available_instances[0]
         
+        
         return cheapest_name, cheapest_info
     
     def display_instance_info(self, instance_name: str, instance_info: Dict):
@@ -128,6 +129,7 @@ def main():
     if result:
         instance_name, instance_info = result
         client.display_instance_info(instance_name, instance_info)
+        os.system("notify-send 'Instance Found'")
         
         # Optional: Return instance data for programmatic use
         return {
